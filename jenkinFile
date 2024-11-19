@@ -1,0 +1,114 @@
+pipeline {
+    agent any
+
+    stages {
+       // clean workspace
+       stage('clean workspace'){
+            steps{
+                cleanWs()
+            }
+        }
+        // cleaning ends here
+
+        // Git Stage starts
+        stage('checkout from git') {
+            steps {
+                git 'https://github.com/CloudSihmar/pet.git'
+            }
+        }
+       // Git stage ends
+       
+       // Static Code Analysis starts
+       stage('Static code analysis') {
+            environment {
+               SCANNER_HOME = tool 'sonar-scanner'
+             }
+        steps {
+          withSonarQubeEnv('sonar-server') {
+         sh """${SCANNER_HOME}/bin/sonar-scanner \\
+                -Dsonar.projectKey=pet-clinic \\
+                -Dsonar.projectName=pet-clinic\\
+                -Dsonar.projectVersion=${BUILD_NUMBER} \\
+                -Dsonar.sources=src/main/java \\
+                -Dsonar.tests=src/test/java \\
+                -Dsonar.exclusions='src/main/resources/**/*.java,src/test/**/*.java,src/pmd/**/*,**/*.properties'
+            """
+       }
+     }
+       }
+      // Static Code Analysis
+
+
+       // Quality Gate stage starts
+       
+       stage("quality gate"){
+           steps {
+                script {
+                    waitForQualityGate abortPipeline: true, credentialsId: 'Sonar-token' 
+                }
+            } 
+        }
+       
+       // Quality Gate ends
+       
+       // Software composition analysis starts
+       
+       stage('OWASP FS SCAN') {
+            steps {
+                dependencyCheck additionalArguments: '--format HTML', odcInstallation: 'Owasp dependency check'
+            }
+        }
+       //Software composition analysis ends
+       
+       // Build stage starts 
+        stage('build') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'dockerhub', passwordVariable: 'docker_password', usernameVariable: 'docker_username')]) {      
+                        // Login to Docker Hub , username and password are stored in jenkins credentials with dockerhub as ID.
+                        sh "docker login -u ${docker_username} -p ${docker_password}"
+
+                        // Build and push Docker image
+                        sh "docker build -t cloudsihmar/new-pet:${BUILD_NUMBER} ."
+                        sh "docker push cloudsihmar/new-pet:${BUILD_NUMBER}"
+                    }
+                    }
+                      }
+        // build stage ends
+        
+        
+        // Trivy scan starts
+          stage("TRIVY-IMAGE-SCAN"){
+            steps{
+                sh "trivy image cloudsihmar/new-pet:${BUILD_NUMBER} --no-progress --exit-code 1 --severity HIGH,CRITICAL > trivyimagescan.txt" 
+                 }
+                   }
+        // Trivy stage ends
+        
+        // Deployment-change starts
+          stage("Deployment-Change"){
+            steps{
+                dir('deployment-dir') {
+                git branch: 'main', url: 'https://github.com/CloudSihmar/pet-argocd-k8s.git'
+                
+                withCredentials([string(credentialsId: 'github-secret', variable: 'GIT_TOKEN')])  {
+                 sh '''
+        
+                    git config --global user.email "cloudsihmar@gmail.com"
+                    git config --global user.name "cloudsihmar"
+                    git config --global user.password "${GIT_TOKEN}"
+                    sed -i "s|image: cloudsihmar/new-pet:.*|image: cloudsihmar/new-pet:${BUILD_NUMBER}|" deployment.yaml
+                    git add deployment.yaml
+                    git commit -m "Update deployment image to version ${BUILD_NUMBER}"
+                    git remote set-url origin https://${GIT_TOKEN}@github.com/cloudsihmar/pet-argocd-k8s.git
+                    git push origin main
+                    ls -al
+                '''
+                 }
+                }
+                }
+                }
+                // Deployment-change ends
+                
+     }
+ }
+
